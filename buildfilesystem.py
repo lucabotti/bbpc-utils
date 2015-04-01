@@ -2,19 +2,13 @@
 # -*- coding: utf-8 -*-
 __author__ = 'lbotti'
 
-
 import os
 import time
-import logging
-import sqlite3
+import threading
 
+import utils.logutils
+from utils.poolfilemanager import PoolFileDBManager
 
-
-
-
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logging.getLogger('buildfilesystem').setLevel(logging.DEBUG)
-logger = logging.getLogger(__name__)
 
 poolpath = '/srv/BackupPC/cpool'
 pcpath = '/srv/BackupPC/pc'
@@ -24,58 +18,70 @@ dbfile = '/srv/BackupPC/backuppc.sqlite.db'
 poolfiles = {}
 todofiles = {}
 
-def walkpoolpath():
+logger = None
+poolfilemgr = None
 
-    logger.debug("Cycling on Pool Directory")
-
-
-    start_time = time.time()
-    for subdir, dirs, links in os.walk(poolpath):
+listOfThreads = []
 
 
-        for link in links:
-            statvalue = os.lstat(os.path.join(subdir, link))
+class ThreadedPathWalker():
+    thread_count = 4
 
-            poolfiles[statvalue.st_ino] = link
+    lock = threading.Lock()
 
-
-    logger.info("Pool walked in %d minutes",(time.time() - start_time)/60)
-
+    paths = []
 
 
-    start_time2 = time.time()
-    logger.debug("Cycling on pc directory")
-    for subdir,dirs,files in os.walk(pcpath):
+    def work_on_files(self, path, threadNumber=0):
+        logger.debug("Thread %s working on path %s", threadNumber, path)
+        start_time = time.time()
+        for rootpath, dirs, files in os.walk(path):
+            logger.debug("rootpath = %s", rootpath)
+            logger.debug("dirs size = %s", len(dirs))
+            logger.debug("files # = %s", len(files))
 
-        for file in files:
-            statvalue = os.lstat(os.path.join(subdir,file))
-
-            if (statvalue.st_ino in poolfiles.keys()):
-                todofiles[file] = poolfiles[statvalue.st_ino]
-                #print file, ' ', poolfiles[statvalue.st_ino]
-
-    logger.info("pc walked in %d minutes" ,  ((time.time() - start_time2)/60))
+            for f in files:
+                logger.debug("Thread %s working on file %s", threadNumber, f)
+                filename = os.path.join(rootpath, f)
+                statvalue = os.lstat(filename)
+                poolfilemgr.insert_pool_file(statvalue.st_ino, filename)
+        logger.info("Path %s walked in %d minutes", path, (time.time() - start_time) / 60)
 
 
+    def pop_queue(self):
+        path = None
+        self.lock.acquire()
 
+        if self.paths:
+            path = self.paths.pop()
 
+        self.lock.release()
 
-def initDB():
-    try:
-        con = sqlite3.connect(dbfile)
+        return path
 
-        with con:
-            cur = con.cursor()
-            cur.execute("CREATE TABLE IF NOT EXISTS BackupFiles(Id INTEGER PRIMARY KEY, Filename TEXT, inode TEXT)")
+    def dequeue(self, threadNumber):
+        logger.debug("Thread %s entering in dequeue", threadNumber)
+        while True:
+            path = self.pop_queue()
+            if not path:
+                return None
+            self.work_on_files(path, threadNumber)
 
-    except sqlite3.Error, e:
-        logger.error("Cannot open SQLlite DB %s", dbfile)
-    finally:
-        if con:
-            con.close()
+    def start(self):
+        threads = []
 
+        for i in range(self.thread_count):
+            t = threading.Thread(target=self.dequeue, kwargs={'threadNumber': i})
+            t.start()
+            threads.append(t)
+
+        [t.join() for t in threads]
 
 
 if __name__ == '__main__':
-
-    walkpoolpath()
+    # add paths to queue
+    poolfilemgr = PoolFileDBManager(dbfile)
+    logger = utils.logutils.initlogger()
+    threadedpathwalker = ThreadedPathWalker()
+    threadedpathwalker.paths = os.listdir(poolpath)
+    threadedpathwalker.start()
