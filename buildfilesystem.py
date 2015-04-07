@@ -5,9 +5,9 @@ __author__ = 'lbotti'
 import os
 import time
 import threading
+from Queue import Queue
 
 import utils.logutils
-from utils.poolfilemanager import PoolFileDBManager
 
 
 poolpath = '/srv/BackupPC/cpool'
@@ -24,106 +24,75 @@ poolfilemgr = None
 listOfThreads = []
 
 
-class ThreadedPathWalker():
-    thread_count = 4
-
-    lock = threading.Lock()
-
-    paths = []
-
-
-    def work_on_files(self, path, threadNumber=0):
-        logger.debug("Thread %s working on path %s", threadNumber, path)
-        start_time = time.time()
-        for rootpath, dirs, files in os.walk(path):
-            logger.debug("rootpath = %s", rootpath)
-            logger.debug("dirs size = %s", len(dirs))
-            logger.debug("files # = %s", len(files))
-
-            for f in files:
-                logger.debug("Thread %s working on file %s", threadNumber, f)
-                filename = os.path.join(rootpath, f)
-                statvalue = os.lstat(filename)
-                poolfilemgr.insert_pool_file(statvalue.st_ino, filename)
-        logger.info("Path %s walked in %d minutes", path, (time.time() - start_time) / 60)
+class ProducerThread(threading.Thread):
+    def __init__(self, producer_queue, consumer_queue):
+        super(ProducerThread, self).__init__()
+        self.producer_queue = producer_queue
+        self.consumer_queue = consumer_queue
 
 
-    def pop_queue(self):
-        path = None
-        self.lock.acquire()
+    def run(self):
 
-        if self.paths:
-            path = self.paths.pop()
-
-        self.lock.release()
-
-        return path
-
-    def dequeue(self, threadNumber):
-        logger.debug("Thread %s entering in dequeue", threadNumber)
         while True:
-            path = self.pop_queue()
-            if not path:
-                return None
-            self.work_on_files(path, threadNumber)
+            path = self.producer_queue.get()
+            self.explore(path)
+            self.producer_queue.task_done()
 
-    def start(self):
-        threads = []
-
-        for i in range(self.thread_count):
-            t = threading.Thread(target=self.dequeue, kwargs={'threadNumber': i})
-            t.start()
-            threads.append(t)
-
-        [t.join() for t in threads]
+    def explore(self, path):
+        logger.debug("Thread exploring %s", path)
+        for rootpath, dirs, files in os.walk(path):
+            for f in files:
+                filename = os.path.join(rootpath, f)
+                logger.debug("Queueing %s", filename)
+                self.consumer_queue.put(filename)
 
 
 class WalkerThread(threading.Thread):
-    def __init__(self, path, counter):
+    def __init__(self, queue):
         super(WalkerThread, self).__init__()
-        self.path = path
-        self.threadNumber = counter
-        self.stoprequest = threading.Event()
+        self.queue = queue
 
     def run(self):
-        while not self.stoprequest.isSet():
-            logger.debug("Thread %s working on path %s", self.threadNumber, path)
-            start_time = time.time()
-            for rootpath, dirs, files in os.walk(path):
-                logger.debug("rootpath = %s", rootpath)
-                logger.debug("dirs size = %s", len(dirs))
-                logger.debug("files # = %s", len(files))
+        while True:
+            file = self.queue.get()
+            logger.debug("Thread working on file %s", file)
+            statvalue = os.lstat(file)
+            # poolfilemgr.insert_pool_file(statvalue.st_ino, file)
+            self.queue.task_done()
 
-                for f in files:
-                    logger.debug("Thread %s working on file %s", self.threadNumber, f)
-                    filename = os.path.join(rootpath, f)
-                    statvalue = os.lstat(filename)
-                    poolfilemgr.insert_pool_file(statvalue.st_ino, filename)
-            logger.info("Path %s walked in %d minutes", path, (time.time() - start_time) / 60)
-
-    def join(self, timeout=None):
-        self.stoprequest.set()
-        super(WalkerThread, self).join(timeout)
 
 if __name__ == '__main__':
     # add paths to queue
-    poolfilemgr = PoolFileDBManager(dbfile)
+    # poolfilemgr = PoolFileDBManager(dbfile)
     logger = utils.logutils.initlogger()
-    # threadedpathwalker = ThreadedPathWalker()
-    # threadedpathwalker.paths = os.listdir(poolpath)
-    # threadedpathwalker.start()
 
-    pool = []
-    counter = 0
+    producer_queue = Queue()
+    consumer_queue = Queue()
 
-    for path in os.listdir(poolpath):
-        counter += 1
-        pool.append(WalkerThread(path, counter))
+    start_time = time.time()
 
-    for thread in pool:
-        thread.start()
+    logger.info(" ************ Starting producer Threads ************ ")
+    for numberofthreads in xrange(os.listdir(poolpath).__len__()):
+        logger.info("Starting thread number %d", numberofthreads)
+        producer = ProducerThread(producer_queue, consumer_queue)
+        producer.start()
 
-    for thread in pool:
-        thread.join()
+    logger.info(" ************ Populating Queue ************ ")
+    for directory in os.listdir(poolpath):
+        realdirectory = os.path.join(poolpath, directory)
+        logger.info(" Inserting Directory %s in producer queue ", realdirectory)
+        producer_queue.put(realdirectory)
 
+    logger.info(" ************ Starting consumer Threads ************ ")
+    for x in xrange(10):
+        worker = WalkerThread(consumer_queue)
+        # worker.daemon = True
+        worker.start()
 
+    consumer_queue.join()
+    producer_queue.join()
+    logger.info(" ************ Ending consumer Threads ************ ")
+
+    end_time = time.time()
+
+    logger.info(" *********** Three Walked in %s minutes", (end_time - start_time) / 60)
