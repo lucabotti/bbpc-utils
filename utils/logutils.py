@@ -22,7 +22,7 @@ def initlogger():
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
     # create formatter and add it to the handlers
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - (%(threadName)-10s) - %(message)s')
     fh.setFormatter(formatter)
     ch.setFormatter(formatter)
     rh.setFormatter(formatter)
